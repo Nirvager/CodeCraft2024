@@ -13,7 +13,7 @@ def distance(a, b) :
 
 #找最近的货物
 def find_nearestgoods(robot_pos, goods):
-    nearest_goods = min(goods, key=lambda goods_pos:distance(goods_pos,robot_pos))
+    nearest_goods = min(goods, key=lambda goods_pos:abs(robot_pos[0]-goods_pos[0])+abs(robot_pos[1])-goods_pos[1])
     return nearest_goods
 
 #找最近的港口
@@ -24,8 +24,8 @@ def find_nearestberth(robot_pos, berth):
 #使用一个简单的A*启发式搜索
 def get_feasible_directions(current_pos):
     """获取没有被障碍物阻塞的方向"""
-    directions = [2, 3, 1, 0] #分别对应 上下左右
-    dx_dy=[(0,1),(0,-1),(-1,0),(1,0)]
+    directions = [2, 3, 1, 0] #分别对应 上下左右  #图中左上角为原点 向下为x正 向右为y正
+    dx_dy=[(-1,0),(1,0),(0,-1),(0,1)]
     feasible_directions = []
 
     #zip是一个合成元组的东西
@@ -70,7 +70,7 @@ class Robot:
     def move(self):
         #先判断是否装了货物
         #已经装了货物
-        if self.status == 1 or zhen <= 100:  #一开始货物很少 我们让机器人直接去码头
+        if self.status == 1:  ###一开始货物很少 我们让机器人直接去码头
             nearest_berth = find_nearestberth((self.x,self.y),berth)
             direction=get_best_direction((self.x,self.y),(nearest_berth.x,nearest_berth.y))
         #未安装货物
