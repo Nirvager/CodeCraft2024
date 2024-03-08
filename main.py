@@ -7,6 +7,30 @@ robot_num = 10  # 机器人的数量
 berth_num = 10  # 泊位的数量
 N = 210  # 用于创建二维数组时的尺寸，略大于n，可能是为了处理边界情况
 
+#ljr3_8 尝试追踪一下每个点的运动
+move_history={}
+
+def update_move_history(current_pos, direction):
+    if current_pos not in move_history:
+        move_history[current_pos] = []
+    move_history[current_pos].append(direction)
+
+def is_repetitive_movement(current_pos, direction):
+    # 检查当前位置是否有记录
+    if current_pos not in move_history:
+        return False
+    history = move_history[current_pos]
+    # 如果历史记录中包含连续的来回移动，则认为是反复运动
+    if len(history) >= 2 and history[-1] == (history[-2]) and history[-2]==direction:
+        return True
+    return False
+
+def opposite_direction(direction):
+    opposites = {2:3,3:2,1:0,0:1}
+    return opposites.get(direction)
+
+
+
 #ljr定义一下曼哈顿距离 后续可修改
 def distance(a, b) :
     return abs(a[0]-b[0])+abs(a[1]-b[1])
@@ -32,7 +56,7 @@ def get_feasible_directions(current_pos):
     for direction,(dx,dy) in zip(directions,dx_dy):
         next_pos = (current_pos[0]+dx,current_pos[1]+dy)
         #检查下一步是否被障碍物阻塞 can be optimized in the future
-        if ch[next_pos[0]][next_pos[1]] == '.':
+        if ch[next_pos[0]][next_pos[1]] == '.' and not is_repetitive_movement(current_pos,direction):
             feasible_directions.append((direction,next_pos))
 
     return feasible_directions
@@ -43,13 +67,15 @@ def get_best_direction(current_pos,goal_pos):
     feasible_directions = get_feasible_directions(current_pos)
 
     #计算每个可行方向的启发式成本
-    best_direction = feasible_directions[0][0]
+    best_direction = 0
     min_cost = float('inf')
     for direction,next_pos in feasible_directions:
         cost = abs(next_pos[0]-goal_pos[0]) + abs(next_pos[1]-goal_pos[1])
         if cost < min_cost:
             min_cost=cost
             best_direction=direction
+
+    update_move_history(current_pos,best_direction)
 
     return best_direction
 
@@ -70,13 +96,14 @@ class Robot:
     def move(self):
         #先判断是否装了货物
         #已经装了货物
-        if self.status == 1:  ###一开始货物很少 我们让机器人直接去码头
+        if self.goods == 1:  ###一开始货物很少 我们让机器人直接去码头
             nearest_berth = find_nearestberth((self.x,self.y),berth)
-            direction=get_best_direction((self.x,self.y),(nearest_berth.x,nearest_berth.y))
+            direction=get_best_direction((self.x,self.y),(nearest_berth.x,nearest_berth.y),)
         #未安装货物
-        if self.status == 0:
+        else:
             nearest_goods = find_nearestgoods((self.x,self.y),goods)
             direction = get_best_direction((self.x, self.y), nearest_goods)
+
         return direction
 
 
@@ -96,6 +123,8 @@ class Berth:
 # 创建泊位实例列表
 berth = [Berth() for _ in range(berth_num + 10)]
 
+
+#准备写一个go函数
 class Boat:
     # 初始化船的属性：编号、位置、状态
     def __init__(self, num=0, pos=0, status=0):
@@ -117,8 +146,7 @@ boat = [Boat() for _ in range(10)]
 
 # 更多全局变量定义
 money = 0  # 货币数量
-#boat_capacity = 0  # 船的容量
-boat_capacity=[int for _ in range(10)]
+boat_capacity = 0  # 船的容量
 id = 0
 ch = []  # 可能用于存储地图信息   可以修改感觉
 gds = [[0 for _ in range(N)] for _ in range(N)]  # 二维数组，用于存储货物信息
@@ -163,17 +191,29 @@ def Input():
     okk = input()
     return id
 
+#ljr3.8判断一下机器人是否在港口
+def is_robot_at_any_port(robot, berth):
+    for port in berth:
+        if robot.x == port.x and robot.y == port.y:
+            return True
+    return False
+
+
 if __name__ == "__main__":
     # 主程序入口
     Init()  # 调用初始化函数
     for zhen in range(1, 15001):
         # 主循环，模拟15000帧的运行
+        if zhen % 3000 == 0:    #因为没有船的策略 所以随便分配的
+            print("ship",zhen//3000,zhen // 3000)
         id = Input()  # 处理每帧的输入
         for i in range(robot_num):
-            # 控制每个机器人随机移动
+            if robot[i].goods == 1 and is_robot_at_any_port(robot[i],berth):
+                print("pull", i)
+                print("go",1)
+            # 控制每个机器人移动
             print("move", i, robot[i].move())
             print("get", i)
-            print("pull",i)
             sys.stdout.flush()
         print("OK")
         sys.stdout.flush()
