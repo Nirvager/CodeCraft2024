@@ -7,13 +7,20 @@ robot_num = 10  # 机器人的数量
 berth_num = 10  # 泊位的数量
 N = 210  # 用于创建二维数组时的尺寸，略大于n，可能是为了处理边界情况
 
+#ljr3_8 尝试追踪一下每个点的运动
+
+#计算相反方向 备用
+def opposite_direction(direction):
+    opposites = {2:3,3:2,1:0,0:1}
+    return opposites.get(direction)
+
 #ljr定义一下曼哈顿距离 后续可修改
 def distance(a, b) :
     return abs(a[0]-b[0])+abs(a[1]-b[1])
 
 #找最近的货物
 def find_nearestgoods(robot_pos, goods):
-    nearest_goods = min(goods, key=lambda goods_pos:distance(goods_pos,robot_pos))
+    nearest_goods = min(goods, key=lambda goods_pos:abs(goods_pos[0]-robot_pos[0])+abs(goods_pos[1]-robot_pos[1]))
     return nearest_goods
 
 #找最近的港口
@@ -21,38 +28,78 @@ def find_nearestberth(robot_pos, berth):
     nearest_berth = min(berth,key=lambda tmp:abs(tmp.x-robot_pos[0])+abs(tmp.y-robot_pos[1]))
     return nearest_berth
 
+#避免陷入死角
+def is_good(next_pos,dx,dy):
+    if ch[next_pos[0]+dx][next_pos[1]+dy] == '.' or ch[next_pos[0]-dx][next_pos[1]+dy] == '.' or ch[next_pos[0]+dx][next_pos[1]-dy] == '.':
+        return True
+    return False
+
 #使用一个简单的A*启发式搜索
-def get_feasible_directions(current_pos):
+def get_feasible_directions(current_pos,move_history):
     """获取没有被障碍物阻塞的方向"""
-    directions = [2, 3, 1, 0] #分别对应 上下左右
-    dx_dy=[(0,1),(0,-1),(-1,0),(1,0)]
+    directions = [2, 3, 1, 0] #分别对应 上下左右  #图中左上角为原点 向下为x正 向右为y正
+    dx_dy=[(-1,0),(1,0),(0,-1),(0,1)]
     feasible_directions = []
 
     #zip是一个合成元组的东西
     for direction,(dx,dy) in zip(directions,dx_dy):
         next_pos = (current_pos[0]+dx,current_pos[1]+dy)
         #检查下一步是否被障碍物阻塞 can be optimized in the future
-        if ch[next_pos[0]][next_pos[1]] == '.':
+        if (ch[next_pos[0]][next_pos[1]] == '.' or ch[next_pos[0]][next_pos[1]] == 'B') and not is_repetitive_movement(move_history,(current_pos,direction)) and is_good(next_pos,dx,dy):
             feasible_directions.append((direction,next_pos))
 
     return feasible_directions
 
 
-def get_best_direction(current_pos,goal_pos):
+def is_repetitive_movement(move_history, choice):
+    """检查重复模式"""
+    if len(move_history) <=3:
+        return False
+    if choice[1] == opposite_direction(move_history[-1][1]):
+        return True
+    return False
+
+def is_circulate_movement(move_history,choice):
+    if choice in move_history:
+        return True
+    return False
+
+def heuristic(next_pos,goal_pos):
+    base_cost = abs(next_pos[0] - goal_pos[0]) + abs(next_pos[1] - goal_pos[1])
+    # 如果已经很接近目标，可能不需要调整成本
+    if base_cost < 100:
+        return base_cost
+
+    obstacle_cost = 0
+    dx = [1, -1, 0, 0]
+    dy = [0, 0, 1, -1]
+    for i in range(4):
+        new_x, new_y = next_pos[0] + dx[i], next_pos[1] + dy[i]
+        # 确保不会检查地图边界之外的位置
+        if 0 <= new_x < len(ch) and 0 <= new_y < len(ch[0]) and ch[new_x][new_y] != '.':
+            obstacle_cost += 0.5  # 对于每个障碍物增加额外的成本
+
+    # 动态调整障碍物成本，距离目标越远，障碍物影响越小
+    adjusted_obstacle_cost = obstacle_cost * (5 / (base_cost + 1))
+
+    return base_cost + adjusted_obstacle_cost
+
+def get_best_direction(current_pos,goal_pos,move_history):
     """基于当前位置、目标位置和障碍物，决定最优的单步移动方向"""
-    feasible_directions = get_feasible_directions(current_pos)
+    feasible_directions = get_feasible_directions(current_pos,move_history)
+
 
     #计算每个可行方向的启发式成本
-    best_direction = feasible_directions[0][0]
+    best_direction = 0
     min_cost = float('inf')
     for direction,next_pos in feasible_directions:
-        cost = abs(next_pos[0]-goal_pos[0]) + abs(next_pos[1]-goal_pos[1])
-        if cost < min_cost:
+        #启发式成本必改
+        cost = heuristic(next_pos,goal_pos)
+        if cost < min_cost and not is_circulate_movement(move_history,(current_pos,direction)):
             min_cost=cost
             best_direction=direction
 
     return best_direction
-
 
 # 类定义
 class Robot:
@@ -64,19 +111,34 @@ class Robot:
         self.status = status
         self.mbx = mbx
         self.mby = mby
+        self.move_history=[]
 
     #move 机器人的移动策略
     #ljr 3.7  晚上 尝试思路1：A*
     def move(self):
+        #撞车了要回溯
+        if self.status == 0:
+            direction = opposite_direction(self.move_history[-1][1])
+            self.move_history.append(((self.x,self.y),direction))
+            if len(self.move_history) >= 125:
+                self.move_history.pop(0)
+            return direction
+
         #先判断是否装了货物
         #已经装了货物
-        if self.status == 1 or zhen <= 100:  #一开始货物很少 我们让机器人直接去码头
+        if self.goods == 1:  ###一开始货物很少 我们让机器人直接去码头
             nearest_berth = find_nearestberth((self.x,self.y),berth)
-            direction=get_best_direction((self.x,self.y),(nearest_berth.x,nearest_berth.y))
+            direction=get_best_direction((self.x,self.y),(nearest_berth.x,nearest_berth.y),self.move_history)
+            self.move_history.append(((self.x,self.y),direction))
         #未安装货物
-        if self.status == 0:
+        if self.goods == 0:
             nearest_goods = find_nearestgoods((self.x,self.y),goods)
-            direction = get_best_direction((self.x, self.y), nearest_goods)
+            direction = get_best_direction((self.x, self.y), nearest_goods,self.move_history)
+            self.move_history.append(((self.x,self.y),direction))
+
+        if len(self.move_history) >=180 :
+            self.move_history.pop(0)
+
         return direction
 
 
@@ -96,6 +158,8 @@ class Berth:
 # 创建泊位实例列表
 berth = [Berth() for _ in range(berth_num + 10)]
 
+
+#准备写一个go函数
 class Boat:
     # 初始化船的属性：编号、位置、状态
     def __init__(self, num=0, pos=0, status=0):
@@ -117,8 +181,7 @@ boat = [Boat() for _ in range(10)]
 
 # 更多全局变量定义
 money = 0  # 货币数量
-#boat_capacity = 0  # 船的容量
-boat_capacity=[int for _ in range(10)]
+boat_capacity = 0  # 船的容量
 id = 0
 ch = []  # 可能用于存储地图信息   可以修改感觉
 gds = [[0 for _ in range(N)] for _ in range(N)]  # 二维数组，用于存储货物信息
@@ -163,17 +226,24 @@ def Input():
     okk = input()
     return id
 
+#ljr3.8判断一下机器人是否在港口
+def is_robot_at_any_port(robot, berth):
+    for port in berth:
+        if robot.x == port.x and robot.y == port.y:
+            return True
+    return False
+
+
 if __name__ == "__main__":
     # 主程序入口
     Init()  # 调用初始化函数
     for zhen in range(1, 15001):
-        # 主循环，模拟15000帧的运行
+        # 主循环，模拟15000帧的运
         id = Input()  # 处理每帧的输入
         for i in range(robot_num):
-            # 控制每个机器人随机移动
+            # 控制每个机器人移动
             print("move", i, robot[i].move())
             print("get", i)
-            print("pull",i)
             sys.stdout.flush()
         print("OK")
         sys.stdout.flush()
