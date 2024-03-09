@@ -268,6 +268,9 @@ class Robot:
             if distance((self.x,self.y),(nearest_berth.x,nearest_berth.y))<100:
                 direction=get_best_direction((self.x,self.y),(nearest_berth.x,nearest_berth.y),self.move_history)
                 self.move_history.append(((self.x,self.y),direction))
+
+                return direction
+        
             else:
                 if self.route_index == 0:
                     path,length=dijkstra(mapp,(self.x,self.y),(nearest_berth.x,nearest_berth.y))
