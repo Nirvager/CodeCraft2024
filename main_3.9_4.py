@@ -283,6 +283,8 @@ class Robot:
                                                    self.move_history)
                     self.move_history.append(((self.x, self.y), direction))
 
+                return direction
+
 
         #未安装货物
         if self.goods == 0:
