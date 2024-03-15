@@ -16,6 +16,7 @@ special_points = []  #10个港口的位置
 special_points_mapp=[] #10个港口在mapp上的位置 注意 mapp是行序优先 与逻辑相反
 mapp = np.zeros((210, 210), dtype=int) #二维数组 用于存储地图
 path={}   #用来记录总的
+dijiecnt = 0  # 用来标记取货物时每轮迪杰斯特拉的上限 以免跳帧跳帧
 
 class Berth:
     # 初始化泊位的属性：位置、运输时间、装载速度
@@ -24,14 +25,13 @@ class Berth:
         self.y = y
         self.transport_time = transport_time
         self.loading_speed = loading_speed
-        self.goods_num = 0 # 泊位处货物数 初始为0
+        self.goods_num = 0 # 储存泊位处堆积货物数
         self.berth_id = 0 # 泊位ID
 
 # 创建泊位实例列表
 berth = [Berth() for _ in range(berth_num)]
 #ljr 3_7增加了一个存储货物信息的列表
 goods=[]
-
 def read_mapp(i,line):
     for j in range(0,n):
         if line[j] == '*' or line[j] == '#':   #障碍物标记为0
@@ -166,7 +166,7 @@ def create_route_memory():
         path[(berth[i].x,berth[i].y)]= dijkstra_to_multiple_goals_with_path_and_length(mapp, special_points[i], goals)
         path[(berth[i+1].x,berth[i+1].y)] = dijkstra_to_multiple_goals_with_path_and_length(mapp, special_points[i + 1], goals)
 
-    # sys.stderr.write(str(i)+"现在是"+str(i+1)+"\n")
+    # # sys.stderr.write(str(i)+"现在是"+str(i+1)+"\n")
 
     #path[(berthx,berthy)][(robotx,roboty)]即得到路径
     #字典 套 字典 套 列表
@@ -256,14 +256,6 @@ def opposite_direction(direction):
 def distance(a, b) :
     return abs(a[0]-b[0])+abs(a[1]-b[1])
 
-#找最近的货物
-def find_nearestgoods(robot_pos, goods):
-    nearest_goods = None
-    for good in goods:
-        if distance(good[0],robot_pos) <= 50:
-            nearest_goods = good
-            break
-    return nearest_goods
 
 #找最近的港口
 def find_nearestberth(robot_pos, berth):
@@ -294,7 +286,7 @@ def get_feasible_directions(current_pos,move_history):
     for direction,(dx,dy) in zip(directions,dx_dy):
         next_pos = (current_pos[0]+dx,current_pos[1]+dy)
         #检查下一步是否被障碍物阻塞 can be optimized in the future
-        if mapp[next_pos[0]][next_pos[1]]==1 and not is_repetitive_movement(move_history,(current_pos,direction)) and is_good(next_pos,dx,dy):
+        if mapp[next_pos[0]][next_pos[1]]==1 and not is_repetitive_movement(move_history,(current_pos,direction)) and is_good(next_pos,dx,dy) and not is_robot_here(next_pos[0],next_pos[1]):
             feasible_directions.append((direction,next_pos))
 
     return feasible_directions
@@ -320,6 +312,7 @@ def is_robot_here(x,y):
             return True
     return False
 
+#这个要修改 启发式函数
 def heuristic(next_pos,goal_pos):
     base_cost = distance(next_pos,goal_pos)
     # 如果已经很接近目标，可能不需要调整成本
@@ -348,16 +341,24 @@ def get_best_direction(current_pos,goal_pos,move_history):
     feasible_directions = get_feasible_directions(current_pos,move_history)
 
     #计算每个可行方向的启发式成本
-    best_direction = random.randint(0,3)
+    best_direction = -1
     min_cost = float('inf')
     for direction,next_pos in feasible_directions:
         #启发式成本必改
         # cost = heuristic(next_pos,goal_pos)
         cost = distance(next_pos,goal_pos)
+        # if cost < min_cost and not is_circulate_movement(move_history,(current_pos,direction)):
         if cost < min_cost and not is_circulate_movement(move_history,(current_pos,direction)):
             min_cost=cost
             best_direction=direction
+        #为了解决墙的问题做出的尝试
+        elif cost == min_cost and len(move_history)>=2:
+            if direction == move_history[-1][1]:
+                best_direction = direction
 
+    #如果被限制了 则wander一下
+    if best_direction not in range(0,4):
+        best_direction = wander(current_pos[0],current_pos[1])
     return best_direction
 
 #将路径转换为方向
@@ -404,40 +405,165 @@ def wander(x,y):
         return 2
     if mapp[x][y+1] == 1:
         return 0
-    else:
+    if mapp[x][y-1] == 1:
         return 1
+
+#第一次就找小范围内的 没有就第二次寻找   假设distance15能有效由A*解决
+def find_nearestgoods(robot_pos, goods):
+    nearest_goods = None
+    for good in goods:
+        if distance(good[0],robot_pos) <= 8:
+            nearest_goods = good
+            break
+    # nearest_goods = min(goods,key=lambda good_pos:distance(robot_pos,good_pos[0]))
+    return nearest_goods
+#第二次找
+def  find_secondnearestgoods(robot_pos,goods):
+    if len(goods)>0:
+        nearest_goods = min(goods,key=lambda good_pos:distance(robot_pos,good_pos[0]))
+        return nearest_goods
+    else:
+        return None
+
+def check_is_good_alive(good_pos):
+    for good in goods:
+        if good[0]==good_pos:
+            return True
+    return False
+
 # 类定义
 class Robot:
     # 初始化机器人的属性：位置、携带的货物、状态、目标泊位的坐标
-    def __init__(self, startX=0, startY=0, goods=0, status=0, mbx=0, mby=0):
+    def __init__(self, startX=0, startY=0, goods=0, status=0, mbx=0, mby=0, mbgx=0,mbgy=0):
         self.x = startX
         self.y = startY
         self.goods = goods
         self.status = status
         self.mbx = mbx  #港口目标
         self.mby = mby
-        self.mbgx = mbx  #
-        self.mbgy = mby
+        #针对目标货物的    都是用于迪杰斯特拉的
+        self.mbgx =mbgx #
+        self.mbgy = mbgy
         self.mbg_zhen = 0
+        self.mbg_val=0
+        #港口迪杰斯特拉路线
         self.route=[]
+        self.route_berth_index = 0
+        #货物迪杰斯特拉路线
         self.goods_route=[]
         self.route_goods_index = 0
-        self.route_berth_index = 0
-        self.flag = 0   #记录转换点
-        self.move_history = []
-        self.is_alive = 1   #这个机器人是活的
-        self.berth_id = -1 # 记录放下货物的泊位的ID
 
-    def move2(self):
+        self.flag = 0   #记录转换点
+        self.move_history = []   #用于A*算法
+        self.is_alive = 1   #这个机器人是活的
+        self.berth_id = -1 # 记录放下货物处泊位的ID
+
+
+    def search_goods_after_dijie(self):
+        if self.goods_route == []:
+            nearest_berth = berth[(i//2)*2]
+            if (self.x, self.y) != (nearest_berth.x, nearest_berth.y):
+                direction = A_star((self.x, self.y), (nearest_berth.x, nearest_berth.y), self.move_history)
+                self.move_history.append(((self.x, self.y), direction))
+                return direction
+            else:
+                nearest_goods = find_secondnearestgoods((self.x, self.y), goods)
+                if nearest_goods == None:
+                    direction = wander(self.x,self.y)
+                    return direction
+                self.goods_route = path[(self.x, self.y)][nearest_goods[0]][2]
+                self.mbgx = nearest_goods[0][0]
+                self.mbgy = nearest_goods[0][1]
+                self.mbg_zhen = nearest_goods[1]
+                self.mbg_val = nearest_goods[2]
+                self.route_goods_index = 0
+                goods.remove(nearest_goods)
+
+        if self.route_goods_index > len(self.goods_route) - 2:
+            self.goods_route = []
+            self.route_goods_index = 0
+            direction = A_star((self.x, self.y), (self.mbgx, self.mbgy), self.move_history)
+            self.move_history.append(((self.x, self.y), direction))
+            if len(self.move_history) >= 10:
+                self.move_history.pop(0)
+            return direction
+
+        direction = find_direction_according_to_route(self.goods_route,self.route_goods_index)
+        self.route_goods_index +=1
+        return direction
+
+    def search_goods(self,dijiecnt):
+        tmp_good = find_nearestgoods((self.x,self.y), goods)    #这是为了应对 假如迪杰斯特拉很远 在路程中碰见很近的可以转换目标
+        if tmp_good != None:
+            if distance(tmp_good[0],(self.x,self.y)) < distance((self.x,self.y),(self.mbgx,self.mbgy)):
+                # # sys.stderr.write("我杀死了dd")
+                self.route_goods_index=0
+                self.goods_route=[]
+                self.mbgx=0
+                self.mbgy=0
+                direction = get_best_direction((self.x, self.y), (tmp_good[0][0], tmp_good[0][1]),self.move_history)
+                self.move_history.append(((self.x, self.y), direction))
+                if len(self.move_history) >= 10:
+                    self.move_history.pop(0)
+                return direction
+
+        #判断一下这个目标货物是不是消失了
+        if check_is_good_alive((self.mbgx,self.mbgy)) == False:
+            self.route_goods_index = 0
+            self.goods_route = []
+            self.mbgx = 0
+            self.mbgy = 0
+
+        if self.goods_route == [] or self.mbgx==0 and self.mbgy == 0:
+            nearest_goods = find_secondnearestgoods((self.x, self.y), goods)
+            #太远了我们还是A*一下 减少迪杰斯特拉的时间
+            if distance(nearest_goods[0],(self.x, self.y)) >= 25 or dijiecnt >=1:
+                #这个地方可以修改
+                # better_nearest_goods = half_nearest(nearest_goods)
+                direction = get_best_direction((self.x,self.y),nearest_goods[0],self.move_history)
+                self.move_history.append(((self.x, self.y), direction))
+                if len(self.move_history) >= 20:
+                    self.move_history.pop(0)
+                return direction
+            # 记录一下基本信息
+            self.mbgx = nearest_goods[0][0]
+            self.mbgy = nearest_goods[0][1]
+            self.mbg_zhen = nearest_goods[1]
+            self.mbg_val = nearest_goods[2]
+
+            self.goods_route = dijkstra(mapp, (self.x, self.y), (self.mbgx, self.mbgy))
+            dijiecnt +=1
+
+            # # sys.stderr.write("我找到了缔结斯特勒")
+            self.route_goods_index = 0
+
+
+            # 以防万一index哪里出错了
+        if self.route_goods_index > len(self.goods_route) - 2:
+            # # sys.stderr.write(str(self.route_goods_index)+"我在爆炸"+str(len(self.goods_route)))
+            self.goods_route = []
+            self.route_goods_index = 0
+            direction = A_star((self.x, self.y), (self.mbgx, self.mbgy), self.move_history)
+            self.move_history.append(((self.x, self.y), direction))
+            if len(self.move_history) >= 20:
+                self.move_history.pop(0)
+            return direction
+
+        direction = find_direction_according_to_route(self.goods_route, self.route_goods_index)
+        self.route_goods_index += 1
+        return direction
+    #move2是迪杰斯特拉 港口对全图嵌入后的移动策略
+    def move2(self,i,dijiecnt):
         if self.goods == 1:
 
-            self.flag=0
             #不知道为什么需要这个 打个补丁
             if (self.x,self.y) in special_points:
                 direction = wander(self.x,self.y)
                 return direction
+
             if self.route == []:
-                nearest_berth = find_nearestberth((self.x, self.y), berth)
+                # nearest_berth = find_nearestberth((self.x, self.y), berth)
+                nearest_berth = berth[(i//2)*2]
                 self.mbx = nearest_berth.x
                 self.mby = nearest_berth.y
                 berth_robotnum[(self.mbx,self.mby)] +=1
@@ -452,183 +578,59 @@ class Robot:
                 self.route_berth_index = 0
                 direction = A_star((self.x, self.y), (self.mbx, self.mby), self.move_history)
                 self.move_history.append(((self.x, self.y), direction))
+                if len(self.move_history) >= 10:
+                    self.move_history.pop(0)
                 return direction
 
-
-            if distance((self.x,self.y),(self.mbx,self.mby)) < 20:
-                direction = A_star((self.x,self.y),(self.mbx,self.mby),self.move_history)
-                self.move_history.append(((self.x, self.y), direction))
-                self.route=[]
-                self.route_berth_index=0
-                # if self.mbx <= self.x and self.x <=self.mbx+3 and self.mby<=self.y and self.y<=self.y+3:
-                #     self.route = []
-            else:
-                direction = find_direction_according_to_route(self.route,self.route_berth_index)
-                self.route_berth_index += 1
+            direction = find_direction_according_to_route(self.route,self.route_berth_index)
+            self.route_berth_index += 1
+            return direction
 
         if self.goods == 0:
-            # if self.flag == 0:
-            #     nearest_goods = find_nearestgoods((self.x,self.y),goods)
-            #     #只分配给一个机器人
-            #     if len(goods) >=2:
-            #         goods.remove(nearest_goods)
-            #     self.mbgx = nearest_goods[0][0]
-            #     self.mbgy = nearest_goods[0][1]
-            #     self.mbg_zhen=nearest_goods[1]
-            #     self.flag = 1
-
-
-            # if self.goods_route != []:
-            #     direction = find_direction_according_to_route(self.goods_route,self.route_goods_index)
-            #     self.route_goods_index+=1
-            #     return direction
-            # nearest_goods = find_nearestgoods((self.x,self.y),goods)
-            # if nearest_goods != None:
-            #     direction = A_star((self.x,self.y),(nearest_goods[0][0],nearest_goods[0][1]),self.move_history)
-            #     self.move_history.append(((self.x, self.y), direction))
-            # else:
-            #     nearest_goods = goods[0]
-            #     self.goods_route=dijkstra(mapp,(self.x,self.y),goods[0])
-            #     self.route_goods_index=0
-            #     goods.remove(nearest_goods)
-
-
-            nearest_goods = find_nearestgoods((self.x,self.y),goods)
-            if nearest_goods != None:
-                direction = get_best_direction((self.x, self.y), (nearest_goods[0][0],nearest_goods[0][1]),self.move_history)
-                self.move_history.append(((self.x,self.y),direction))
-            else:
-                direction = wander(self.x,self.y)
-
-        if len(self.move_history) >=40 :
-            self.move_history.pop(0)
-
-        return direction
-
-    #move 机器人的移动策略
-    #ljr 3.7  晚上 尝试思路1：A*
-    def move(self,i):
-        #某个撞车的函数
-        #撞车了要回溯  主要是感觉不太会装车吧
-        # if self.status == 0:
-        #     direction = opposite_direction(self.move_history[-1][1])
-        #     self.move_history.append(((self.x,self.y),direction))
-        #     if len(self.move_history) >= 125:
-        #         self.move_history.pop(0)
-        #     return direction
-
-        #先判断是否装了货物
-        #已经装了货物
-        # if self.goods == 1:
-        #     nearest_berth = find_nearestberth((self.x, self.y), berth)
-        #     # self.mbx = nearest_berth.x
-        #     # self.mby = nearest_berth.y
-        #     # if self.flag == 0:
-        #     #     self.flag = 1
-        #
-        #     if distance((self.x,self.y),(nearest_berth.x,nearest_berth.y))<40:
-        #         direction=get_best_direction((self.x,self.y),(nearest_berth.x,nearest_berth.y),self.move_history)
-        #         self.move_history.append(((self.x,self.y),direction))
-        #         return direction
-        #     else:
-        #         length = 0
-        #         if self.route_berth_index == 0:
-        #             path,length=dijkstra(mapp,(self.x,self.y),(nearest_berth.x,nearest_berth.y))
-        #             self.route=path
-        #         if self.route:  # 确保route不为空
-        #             direction = find_direction_according_to_route(self.route,self.route_berth_index)
-        #             self.route_berth_index += 1
-        #             #如果到了就清零
-        #             if self.route_berth_index == length:
-        #                 self.route_berth_index = 0
-        #             return direction
-        #         else:
-        #             direction = get_best_direction((self.x, self.y), (nearest_berth.x, nearest_berth.y),self.move_history)
-        #             # self.move_history.append(((self.x, self.y), direction))
-        #
-        #             return direction
+            direction = self.search_goods(dijiecnt)
+            return direction
+    #move是dijie未结束时的策略
+    def move(self,i,dijiecnt):
         if self.goods == 1:
             if self.route == []:
                 # nearest_berth = find_nearestberth((self.x, self.y), berth)
-                nearest_berth = berth[i]
+                nearest_berth = berth[(i//2)*2]
                 self.mbx=nearest_berth.x
                 self.mby=nearest_berth.y
                 # if distance((self.x,self.y),(self.mbx,self.mby))>=20:
                 self.route=dijkstra(mapp,(self.x,self.y),(self.mbx,self.mby))
                 self.route_berth_index=0
 
-            # sys.stderr.write("hhhhhhhh"+str(self.route))
+            # # sys.stderr.write("hhhhhhhh"+str(self.route))
             if self.route_berth_index > len(self.route) - 2:
                 self.route = []
                 self.route_berth_index = 0
                 direction = A_star((self.x, self.y), (self.mbx, self.mby), self.move_history)
                 self.move_history.append(((self.x, self.y), direction))
+                if len(self.move_history) >= 10:
+                    self.move_history.pop(0)
                 return direction
 
-            if distance((self.x,self.y),(self.mbx,self.mby))<20:
-                direction=A_star((self.x,self.y),(self.mbx,self.mby),self.move_history)
-                self.move_history.append(((self.x,self.y),direction))
+            if self.route:  # 确保route不为空
+                direction = find_direction_according_to_route(self.route,self.route_berth_index)
+                self.route_berth_index +=1
             else:
-                # if self.route_berth_index:  # 检查索引是否在有效范围内
-                # if self.route == []:
-                if self.route:  # 确保route不为空
-                    direction = find_direction_according_to_route(self.route,self.route_berth_index)
-                    self.route_berth_index +=1
-                else:
-                    direction = A_star((self.x,self.y),(self.mbx,self.mby),self.move_history)
-                    self.move_history.append(((self.x, self.y), direction))
+                direction = A_star((self.x,self.y),(self.mbx,self.mby),self.move_history)
+                self.move_history.append(((self.x, self.y), direction))
+            if len(self.move_history) >= 10:
+                self.move_history.pop(0)
+            return direction
+
         #未安装货物
         if self.goods == 0:
-            # if self.goods_route != []:
-            #     direction = find_direction_according_to_route(self.goods_route,self.route_goods_index)
-            #     self.route_goods_index+=1
-            #     return direction
-            nearest_goods = find_nearestgoods((self.x,self.y),goods)
-            if nearest_goods != None:
-                direction = get_best_direction((self.x, self.y), (nearest_goods[0][0],nearest_goods[0][1]),self.move_history)
-                self.move_history.append(((self.x,self.y),direction))
-            else:
-                direction=wander(self.x,self.y)
-            # else:
-            #     nearest_goods = goods[0]
-            #     self.goods_route = dijkstra(mapp, (self.x, self.y), goods[0])
-            #     self.route_goods_index = 0
-            #
-            #     sys.stderr.write(str(self.goods_route)+"\n")
-            #
-            #     direction =find_direction_according_to_route(self.goods_route,self.route_goods_index)
-            #     self.route_goods_index+=1
-            #     goods.remove(nearest_goods)
-
-
-
-            # if distance((self.x,self.y),(nearest_goods[0][0],nearest_goods[0][1])) < 50:
-            #     direction = get_best_direction((self.x, self.y), (nearest_goods[0][0],nearest_goods[0][1]),self.move_history)
-            #     self.move_history.append(((self.x,self.y),direction))
-            # else:
-            #     if self.route_index == 0:
-            #         path,length=dijkstra(mapp,(self.x,self.y),(nearest_goods[0][0],nearest_goods[0][1]))
-            #         self.route = jiexi_path(path)
-            #
-            #     if self.route:  # 确保route不为空
-            #         if 0 <= self.route_index < len(self.route):  # 检查索引是否在有效范围内
-            #             direction = self.route[self.route_index]
-            #             self.route_index +=1
-            #     else:
-            #         direction = get_best_direction((self.x, self.y), (nearest_goods[0][0],nearest_goods[0][1]),self.move_history)
-            #         self.move_history.append(((self.x, self.y), direction))
-
-      #具有一定的记忆功能 但得后续再改
-        if len(self.move_history) >=40 :
-            self.move_history.pop(0)
-
-        return direction
+            direction = self.search_goods(dijiecnt)
+            return direction
 
 
 
 # 创建机器人实例列表
 robot = [Robot() for _ in range(robot_num + 10)]
-xrobot = [Robot() for _ in range(robot_num + 10)] # 虚拟机器人 只需要位置坐标即可
+
 
 #准备写一个go函数
 class Boat:
@@ -637,14 +639,8 @@ class Boat:
         self.num = num
         self.pos = pos
         self.status = status
-
-    # #go 船装完货离开
-    # def go(self,berth_id):
-    #     print(1)
-
-    # #ship  船选择港口停靠 策略？
-    # def ship(self,berth_id):
-    #     print(2)
+        self.start_zhen = 0
+        self.arrive_zhen = 0
 
 
 # 创建船实例列表
@@ -658,7 +654,7 @@ ch = []  # 可能用于存储地图信息   可以修改感觉
 gds = [[0 for _ in range(N)] for _ in range(N)]  # 二维数组，用于存储货物信息
 sorted_berth_goods_num = [] # 按堆积货物数对泊位排序
 
-def Init(mapp):
+def Init(mapp,t1):
 
     # 初始化函数，用于从输入读取初始配置
     global boat_capacity
@@ -681,28 +677,45 @@ def Init(mapp):
         berth[id].berth_id = id
 
         # sys.stderr.write("港口的位置:"+str(berth[id].x)+" "+str(berth[id].y)+"\n")
-    
     boat_capacity = int(input())
 
     #对mapp进行预处理
     mapp = retain_connected_special_points(mapp,special_points)
-    # sys.stderr.write(str(mapp[109][61]))
     for rt in robot:
         if mapp[rt.x][rt.y] == 0:
             rt.is_alive = 0
+
+    t1.start()
 
     okk = input()
     print("OK")
     sys.stdout.flush()
 
-#ljr增加了一个删除货物的函数
+#ljr增加了一个按照时间删除货物的函数
 def delete_goods(zhen):
-    for i in range(len(goods)):
-        if zhen - goods[i][1]>=1000:
-            gds[goods[i][0][0]][goods[i][0][1]]=0
-            goods.remove(goods[i])
-        else:
-           break
+    for good in goods:
+        if good[1] - zhen >=1000:
+            goods.remove(good)
+#去除一些位置不好的货物
+def check_goods(x,y):
+    if mapp[x][y] == 0:
+        return False
+    cnt = 0
+    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        if mapp[x+dx][y+dy] == 0:
+            cnt +=1
+    if cnt>=3:
+        return False
+    return True
+
+#按照价值大小插入
+# def goods_append(n):
+#     for i in range(len(goods)):
+#         if good[2] > goods[i][2]+10:
+#             goods.insert(i,good)
+#             return goods
+#     goods.append(good)
+#     return goods
 
 def Input(zhen):
     # 输入函数，用于在每一"帧"读取新的输入数据并更新系统状态
@@ -711,17 +724,17 @@ def Input(zhen):
     for i in range(num):
         x, y, val = map(int, input().split())
         #增加一步检测 若货物在死位则不增加
-        if mapp[x][y] == 0:
+        if check_goods(x,y) == False:
             continue
         else:
-            goods.append(((x,y),zhen))
-            gds[x][y] = val
+            goods.append(((x,y),zhen,val))
 
     for i in range(robot_num):
         robot[i].goods, robot[i].x, robot[i].y, robot[i].status = map(int, input().split())
 
     for i in range(5):
         boat[i].status, boat[i].pos = map(int, input().split())
+
     okk = input()
     return id
 
@@ -734,10 +747,6 @@ def is_robot_at_any_port(robot, berth):
 
 # 后续可能会用到机器人pull货物的泊位的ID
 def int_is_robot_at_any_port(robot, berth):
-    # for i in range(0, 5):
-    #     if berth[i].x <= robot.x and robot.x <= berth[i].x + 3 and berth[i].y <= robot.y and robot.y <= berth[i].y + 3:
-    #         return i+1
-    # return 0
     t = 1
     for port in berth:
         if port.x <= robot.x and robot.x <=port.x+3 and port.y<=robot.y and robot.y <=port.y+3:
@@ -756,244 +765,263 @@ def goods_go(robot_pos):
     for good in goods:
         if good[0] == robot_pos:
             goods.remove(good)
+
+def check_robot(x,y):
+    cnt = 0
+    for dx, dy in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
+        checkmate = (x+dx,y+dy)
+        for rt in robot:
+            if (rt.x,rt.y) == checkmate:
+                cnt += 1
+    if cnt >=2:
+        return False
+    return True
+
+#通过当前位置和方向计算下一个位置
+def use_direction_to_calculate_nextpos(x,y,direction):
+    if direction == 3:
+        return (x+1,y)
+    elif direction == 2:
+        return (x-1,y)
+    elif direction == 1:
+        return (x,y-1)
+    elif direction == 0:
+        return (x,y+1)
+    else:
+        return (x,y)
+
+
+#记录机器人本轮移动前位置
+list_current_pos=[]
+#记录机器人移动后位置
+list_next_pos=[]
+#记录机器人本轮移动方向
+direction_list=[]
+#判断目的地有没有相同的
+def check_if_there_is_same_next_pos_before(i):
+    # # sys.stderr.write(str(list_next_pos)+str(i))
+    tmp = list_next_pos[i]
+    for j in range(i):
+        if list_next_pos[j] == tmp:
             return True
     return False
+def check_if_there_is_a_duizhuangcrash_before(i):
+    tmp = list_next_pos[i]
+    for j in range(i):
+        if list_current_pos[j] == tmp:
+            tmp2 = list_next_pos[j]
+            if tmp2 == list_current_pos[i]:
+                return True
+    return False
+def check_another_possible_direction(x,y,direction):
+    if direction == 3 or direction ==2 :
+        if mapp[x][y+1] == 1:
+            return 0,(x,y+1)
+        if mapp[x][y-1] == 1:
+            return 1,(x,y-1)
+        if direction == 3:
+            return 2,(x-1,y)
+        if direction == 2:
+            return 3,(x+1,y)
 
+    if direction == 0 or direction == 1:
+        if mapp[x+1][y] == 1:
+            return 3,(x+1,y)
+        if mapp[x-1][y] == 1:
+            return 2,(x-1,y)
+        if direction == 0:
+            return 1,(x,y-1)
+        if direction == 1:
+            return 0,(x,y+1)
 if __name__ == "__main__":
     # 主程序入口
-    Init(mapp)  # 调用初始化函数
-    # 创造一个线程单独来干迪杰斯特拉的活
     t1 = threading.Thread(target=create_route_memory)
-    t1.start()
-    sign=1
-    sign2=1
+    Init(mapp,t1)  # 调用初始化函数
+    # 创造一个线程单独来干迪杰斯特拉的活
+    sign=1   #用来标记第一次进入t1.is_dead 便于初始化
+    # sign2=1   #用来标记第一次进入t1.is_alive 便于初始化
     for zhen in range(1, 15001):
+        delete_goods(zhen)
         # sys.stderr.write(str(t1.is_alive()))
         # 主循环，模拟15000帧的运
         id = Input(zhen)  # 处理每帧的输入
-        # if zhen == 100:
-        #     print("ship",0,3)
-        #     print("ship",1,5)
-        #     print("ship", 2, 4)
-        #     print("ship", 3, 7)
-        #     print("ship", 4, 8)
-        # if zhen == 12000:
-        #     print("go",1)
-        #     print("go", 4)
-        #     print("go",2)
-        #     print("go",3)
-        #     print("go", 0)
-        delete_goods(zhen)
+
+        # 每一次进来先初始化
+        list_current_pos = []
+        list_next_pos = []
+        direction_list = []
 
         if t1.is_alive():  #当迪杰斯特拉整体没有算完的时候
-            if sign2 == 1:
-                for rt in robot:
-                    rt.route=[]
-                    rt.route_berth_index=0
+            dijiecnt = 0
             for i in range(robot_num):
+
+                list_current_pos.append((robot[i].x, robot[i].y))
                 if mapp[robot[i].x][robot[i].y] == 0:
+                    list_next_pos.append((robot[i].x, robot[i].y))
+                    #表示不动
+                    direction_list.append(-2)
                     continue
-                # 控制每个机器人移动
-                print("move", i, robot[i].move(i)) # 尝试改变指令顺序x->见下
-                print("get", i) 
-                # print("pull", i)
-                """
-                实践证明
-                如果想要实现任务书中所提示的“同一帧内执行多条指令”
-                需要将更新后的机器人的位置信息传递到后续的两个位置判断函数中 但是并不修改本身的位置
-                此处判题器分析场面信息的逻辑不知道是读取参数还是根据前一帧的信息和指令来更新 个人更倾向于后者
-                如果是后者则可以直接修改程序内Robot类列表的参数 前者则需要借助类似于“形参”的概念重新声明一个列表来储存并判断
-                下面将尝试主动修改move后的机器人位置参数
-                PS: 任务书中说明 坐标系往下为X轴正方向 往右为Y轴正方向
-                    判题器中显示 坐标系往右为X轴正方向 往下为Y轴正方向
-                    此时(3.12)判题器版本为V2 赛题组承诺会更新
-                    此处暂时用判题器的逻辑x->实践证明错误 score三位数    任务书逻辑x->实践证明错误 score四位数
-                    上述两种情况说明可能机器人参数不能随便修改 尝试使用虚拟机器人x->参数过多 无法正确修改
-                    使用无赖思路
-                    根据任务书中所描述的 将会忽略逻辑异常及参数错误的指令 且不扣分 因此只需在每一次move后都跟上get和pull即可
-                    此时不知Robot类中的参数是否会有影响
-                    无赖思路失败 Robot类参数最终会影响到结果
-                事实证明 采用
-                move->无条件get->有条件get->有条件pull  score最大
-                有条件get->有条件pull->move 次之
-                move->无条件get->无条件pull 最小
-                """
-                # # 机器人位置信息及时更新
-                # if robot[i].move(i) == 0: # 右移一格
-                #     # robot[i].y += 1 # 左右Y上下X
-                #     # robot[i].x += 1 # 左右X上下Y
-                #     # xrobot[i].y = robot[i].y + 1 # 左右Y上下X
-                #     xrobot[i].x = robot[i].x + 1 # 左右X上下Y
-
-                # elif robot[i].move(i) == 1: # 左移一格
-                #     # robot[i].y -= 1 # 左右Y上下X
-                #     # robot[i].x -= 1 # 左右X上下Y
-                #     # xrobot[i].y = robot[i].y - 1 # 左右Y上下X
-                #     xrobot[i].x = robot[i].x - 1 # 左右X上下Y
-
-                # elif robot[i].move(i) == 2: # 上移一格
-                #     # robot[i].x -= 1 # 左右Y上下X
-                #     # robot[i].y -= 1 # 左右X上下Y
-                #     # xrobot[i].x = robot[i].x - 1 # 左右Y上下X
-                #     xrobot[i].y = robot[i].y - 1 # 左右X上下Y
-
-                # else: #robot[i].move(i) == 3 下移一格
-                #     # robot[i].x += 1 # 左右Y上下X
-                #     # robot[i].y += 1 # 左右X上下Y
-                #     # xrobot[i].x = robot[i].x + 1 # 左右Y上下X
-                #     xrobot[i].y = robot[i].y + 1 # 左右X上下Y
-
-                # 使用机器人本身
                 if is_robot_at_any_goods(robot[i], goods):
+                    # sys.stderr.write("找到一个")
                     print("get", i)
+
+                    #找到货物 开始走向码头 进行一系列初始化
                     robot[i].route = []
                     robot[i].route_berth_index = 0
+                    robot[i].mbx=0
+                    robot[i].mby=0
+                    #找到货物后 为下一次找货物做初始化
+                    robot[i].mbgx=0
+                    robot[i].mbgy=0
+                    robot[i].goods_route=[]
+                    robot[i].route_goods_index = 0
+                    robot[i].move_history=[]
+
                     goods_go((robot[i].x,robot[i].y))
-                # # # 使用虚拟机器人 因为Robot的参数太多了 不敢随意修改 大概率不成功
-                # # if is_robot_at_any_goods(xrobot[i], goods):
-                # #     print("get", i)
-                # #     robot[i].route = []
-                # #     robot[i].route_berth_index = 0
-                # #     goods_go((xrobot[i].x,xrobot[i].y))
 
                 if int_is_robot_at_any_port(robot[i], berth) > 0:
                     berth[int_is_robot_at_any_port(robot[i], berth) - 1].goods_num += 1
                     print("pull", i)
 
-                    # if robot[i].flag == 1:
-                    #     berth_robotnum[(robot[i].mbx, robot[i].mby)] -= 1
-                    # robot[i].flag = 0
-
-                    robot[i].route_goods_index= []
+                    #到港口 为下一次到港口进行一系列初始化
+                    robot[i].route = []
+                    robot[i].route_berth_index = 0
+                    robot[i].mbx=0
+                    robot[i].mby=0
+                    #到港口 开始找货物做初始化
+                    robot[i].mbgx=0
+                    robot[i].mbgy=0
+                    robot[i].goods_route=[]
                     robot[i].route_goods_index = 0
+                    robot[i].move_history = []
 
-                # print("move", i, robot[i].move(i))
+                # 控制每个机器人移动
+                direction = robot[i].move(i,dijiecnt)
+                direction_list.append(direction)
 
-
-                # # if is_robot_at_any_port(robot[i], berth):
-                # #     print("pull", i)
-
-                # #     # if robot[i].flag == 1:
-                # #     #     berth_robotnum[(robot[i].mbx, robot[i].mby)] -= 1
-                # #     # robot[i].flag = 0
-
-                # #     robot[i].route_goods_index= []
-                # #     robot[i].route_goods_index = 0
-                sign2=0
+                next_pos = use_direction_to_calculate_nextpos(robot[i].x,robot[i].y,direction)
+                list_next_pos.append(next_pos)
                 sys.stdout.flush()
-
+            for i in range(robot_num):
+                if check_if_there_is_same_next_pos_before(i) == True:
+                    #停下来
+                    if robot[i].route:
+                        robot[i].route_berth_index -= 1
+                    if robot[i].goods_route:
+                        robot[i].route_goods_index -=1
+                    list_next_pos[i] = list_current_pos[i]
+                    continue
+                if check_if_there_is_a_duizhuangcrash_before(i) == True:
+                    direction_list[i],list_next_pos[i] =check_another_possible_direction(robot[i].x,robot[i].y,direction_list[i])
+                    if robot[i].route:
+                        robot[i].route=[]
+                        robot[i].route_berth_index=0
+                        robot[i].move_history=[]
+                    if robot[i].goods_route:
+                        robot[i].goods_route=[]
+                        robot[i].route_goods_index=0
+                        robot[i].move_history = []
+                if direction_list[i] in range(0, 4):
+                    print("move", i, direction_list[i])
         else: #迪杰斯特拉算完之后 到港口直接使用迪杰斯特拉
             #第一次先初始化 去掉之前的痕迹
             if sign == 1:
                 for i in range(robot_num):
                     robot[i].route=[]
                     robot[i].route_berth_index=0
+            dijiecnt = 0
             for i in range(robot_num):
+                list_current_pos.append((robot[i].x, robot[i].y))
                 if mapp[robot[i].x][robot[i].y] == 0:
+                    list_next_pos.append((robot[i].x, robot[i].y))
+                    #表示不动
+                    direction_list.append(-2)
                     continue
-                # 控制每个机器人移动
-                print("move", i, robot[i].move2()) # 尝试改变指令顺序
-                print("get", i) 
-                # print("pull", i)
 
-                # # 机器人位置信息及时更新
-                # if robot[i].move2() == 0: # 右移一格
-                #     robot[i].y += 1 # 左右Y上下X
-                #     # robot[i].x += 1 # 左右X上下Y
-                #     # xrobot[i].x = robot[i].x + 1
-                # elif robot[i].move2() == 1: # 左移一格
-                #     robot[i].y -= 1 # 左右Y上下X
-                #     # robot[i].x -= 1 # 左右X上下Y
-                #     # xrobot[i].x = robot[i].x - 1
-                # elif robot[i].move2() == 2: # 上移一格
-                #     robot[i].x -= 1 # 左右Y上下X
-                #     # robot[i].y -= 1 # 左右X上下Y
-                #     # xrobot[i].y = robot[i].y - 1
-                # else: #robot[i].move2() == 3 下移一格
-                #     robot[i].x += 1 # 左右Y上下X
-                #     # robot[i].y += 1 # 左右X上下Y
-                #     # xrobot[i].y = robot[i].y + 1
-
-                # 使用机器人本身
                 if is_robot_at_any_goods(robot[i], goods):
+                    sys.stderr.write("找到一个")
                     print("get", i)
+                    #找到货物 开始走向码头 进行一系列初始化
                     robot[i].route = []
                     robot[i].route_berth_index = 0
+                    robot[i].mbx=0
+                    robot[i].mby=0
+                    #找到货物后 为下一次找货物做初始化
+                    robot[i].mbgx=0
+                    robot[i].mbgy=0
+                    robot[i].goods_route=[]
+                    robot[i].route_goods_index = 0
+                    robot[i].move_history = []
+
                     goods_go((robot[i].x,robot[i].y))
-                # # # 使用虚拟机器人 因为Robot的参数太多了 不敢随意修改 大概率不成功
-                # # if is_robot_at_any_goods(xrobot[i], goods):
-                # #     print("get", i)
-                # #     robot[i].route = []
-                # #     robot[i].route_berth_index = 0
-                # #     goods_go((xrobot[i].x,xrobot[i].y))
 
                 if int_is_robot_at_any_port(robot[i], berth) > 0:
                     berth[int_is_robot_at_any_port(robot[i], berth) - 1].goods_num += 1
                     print("pull", i)
-
-                    # if robot[i].flag == 1:
-                    #     berth_robotnum[(robot[i].mbx, robot[i].mby)] -= 1
-                    # robot[i].flag = 0
-
-                    # robot[i].route_goods_index = []
-                    robot[i].goods_route = []
+                    robot[i].route = []
+                    robot[i].route_berth_index = 0
+                    robot[i].mbx=0
+                    robot[i].mby=0
+                    #到港口 开始找货物做初始化
+                    robot[i].mbgx=0
+                    robot[i].mbgy=0
+                    robot[i].goods_route=[]
                     robot[i].route_goods_index = 0
+                    robot[i].move_history = []
 
-                # print("move", i, robot[i].move2())
 
-                # # if is_robot_at_any_port(robot[i], berth):
-                # #     print("pull", i)
+                # 控制每个机器人移动
+                direction = robot[i].move2(i, dijiecnt)
+                direction_list.append(direction)
 
-                # #     #这里考虑到了密度 后面要改
-                # #     # if robot[i].flag == 1:
-                # #     #     berth_robotnum[(robot[i].mbx, robot[i].mby)] -= 1
-                # #     # robot[i].flag = 0
-
-                # #     robot[i].goods_route = []
-                # #     robot[i].route_goods_index = 0
-
+                next_pos = use_direction_to_calculate_nextpos(robot[i].x, robot[i].y, direction)
+                list_next_pos.append(next_pos)
                 sys.stdout.flush()
-                sign = 0
 
-        # 船舶指令
+            for i in range(robot_num):
+                if check_if_there_is_same_next_pos_before(i) == True:
+                    # 停下来
+                    if robot[i].route:
+                        robot[i].route_berth_index -= 1
+                    if robot[i].goods_route:
+                        robot[i].route_goods_index -= 1
+                    list_next_pos[i] = list_current_pos[i]
+                    continue
+                if check_if_there_is_a_duizhuangcrash_before(i) == True:
+                    direction_list[i],list_next_pos[i] =check_another_possible_direction(robot[i].x,robot[i].y,direction_list[i])
+                    if robot[i].route:
+                        robot[i].route=[]
+                        robot[i].route_berth_index=0
+                        robot[i].move_history=[]
+                    if robot[i].goods_route:
+                        robot[i].goods_route=[]
+                        robot[i].route_goods_index=0
+                        robot[i].move_history = []
+                if direction_list[i] in range(0,4):
+                    print("move", i, direction_list[i])
+                sys.stdout.flush()
+
+        # 更新泊位处货物堆积数
         for i in range(5):
-            # if zhen < 5000: # 尝试50 -> 5000 反正从头到尾都装不满
-            if id < 5000:
-                pass # 给机器人50帧时间送一点货物 从而得到最容易收到货物的泊位
-            else:
-                # ship
-                if boat[i].status == 1 and boat[i].pos == -1: # 位于虚拟点
-                    # print("ship", i, random.randint(0,9)) # 随机出发
-                    # 按泊位货物堆积数从大到小 并按顺序出发
-                    # if zhen == 5000:
-                    if id == 5000:
-                        # 首次出发
-                        sorted_berth_goods_num = sorted(berth, key=lambda berth: berth.goods_num, reverse=True) # 对50帧时的泊位进行货物数的降序排列
-                        # print("ship", i, berth[sorted_berth_goods_num[i]].berth_id)
-                        # boat[i].pos = sorted_berth_goods_num[i].berth_id # 状态更新x->判题器修改
-                        print("ship", i, sorted_berth_goods_num[i].berth_id) # 不懂
-                    else:
-                        # 再次出发
-                        print("ship", i, random.randint(0,9)) # 随意一些吧
-                
-                # load
-                # if boat[i].status == 1 and boat[i].pos != -1: # 位于某一泊位
-                #     # 更新船舶装载货物
-                #     boat[i].num += min(min(berth[boat[i].pos].loading_speed, berth[boat[i].pos].goods_num), boat_capacity - boat[i].num)
-                #     # 更新泊位剩余货物
-                #     berth[boat[i].pos].goods_num -= min(min(berth[boat[i].pos].loading_speed, berth[boat[i].pos].goods_num), boat_capacity - boat[i].num)
+            if boat[i].status == 1 and boat[i].pos != -1:
+                berth[boat[i].pos].goods_num -= min(berth[boat[i].pos].loading_speed, berth[boat[i].pos].goods_num)
+            # 首次发船
+            if zhen == 1000:
+                sorted_berth_goods_num = sorted(berth, key=lambda berth: berth.goods_num, reverse=True) # 对100帧时的泊位进行货物数的降序排列
+                boat[i].start_zhen = 1000
+                print("ship", i, sorted_berth_goods_num[i].berth_id)
+            # 回到虚拟点直接发船
+            if boat[i].status == 1 and boat[i].pos == -1:
+                sorted_berth_goods_num = sorted(berth, key=lambda berth: berth.goods_num, reverse=True) # 对100帧时的泊位进行货物数的降序排列
+                print("ship", i, sorted_berth_goods_num[i].berth_id)
 
-                # go
-                if boat[i].num == boat_capacity:
-                    # 达到船舶最大容量 返回虚拟点
-                    print("go", i)
-                # 最后通牒 到这时候了必须回去 能赚一点是一点
-                #if zhen == 12998: # 12998由 泊位到虚拟点时间范围[1,2000]和整体时间14999帧得到 细节仍需商讨
-                if id == 12998:
-                    print("go", 0)
-                    print("go", 1)
-                    print("go", 2)
-                    print("go", 3)
-                    print("go", 4)
+
+            if zhen == 3500:
+                print("go", i)
+            if zhen == 8500:
+                print("go", i)
+            if zhen == 12500:
+                print("go", i)
+
         print("OK")
         sys.stdout.flush()
